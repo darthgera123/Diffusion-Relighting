@@ -73,7 +73,7 @@ def forward_process(x0, t,betas,device='cpu'):
     sqrt_alphas_cumprod_t = get_index(sqrt_alphas_cumprod, t, x0.shape)
     sqrt_one_minus_alphas_cumprod_t = get_index(sqrt_one_minus_alphas_cumprod, t, x0.shape)
 
-    #mean + variance
+    #final image constructed
     return sqrt_alphas_cumprod_t.to(device)* x0.to(device) \
     + sqrt_one_minus_alphas_cumprod_t.to(device)* epsilon.to(device), epsilon.to(device)
 

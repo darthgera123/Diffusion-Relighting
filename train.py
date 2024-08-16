@@ -15,8 +15,6 @@ from forward import linear_beta_scheduler,\
     cosine_beta_scheduler,compute_alphas,get_index
 from model import UNet
 from data import DiffusionDataset
-# Define a diffusion class and make them all part of this
-
 
 def num_to_groups(num, divisor):
     groups = num // divisor
@@ -110,7 +108,7 @@ class DDPM:
             x - betas_t*x_prev/sqrt_one_minus_alphas_cumprod_t
         )
         if t_index > 0:
-            posterior_variance_t = get_index(posterior_variance, t, x.shape)
+            posterior_variance_t = get_index(self.posterior_variance, t, x.shape)
             epsilon = torch.randn_like(x).to(self.device)
             return model_mean + torch.sqrt(posterior_variance_t)*epsilon
         else:
@@ -121,7 +119,7 @@ class DDPM:
         b = shape[0]
         img = torch.randn(shape).to(self.device)
         imgs = []
-        for i in tqdm(reversed(range(0,timesteps)), desc='sampling loop timestep',total=timesteps):
+        for i in tqdm(reversed(range(0,self.timesteps)), desc='sampling loop timestep',total=self.timesteps):
             img = self.p_sample(img,torch.full((b,),i,device=self.device,dtype=torch.long),i)
             imgs.append(img.cpu().numpy())
         return imgs
