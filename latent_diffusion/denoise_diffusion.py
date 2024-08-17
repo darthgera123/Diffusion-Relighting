@@ -16,12 +16,12 @@ class DenoisingDiffusion(nn.Module):
                  channels=3,
                  loss_type='l2',
                  schedule='linear',
-                 num_timsteps=1000,
+                 num_timesteps=1000,
                  sampler=None) -> None:
         super().__init__()
 
         self.channels = channels
-        self.num_timesteps = num_timsteps
+        self.num_timesteps = num_timesteps
 
         if loss_type == 'l1':
             self.criterion = F.l1_loss
@@ -32,15 +32,15 @@ class DenoisingDiffusion(nn.Module):
         else:
             raise NotImplementedError()
         
-        self.forward_process = GaussianForwardProcess(num_timsteps=num_timsteps,
-                                                      schedule=schedule)
+        self.forward_process = GaussianForwardProcess(num_timesteps=num_timesteps,
+                                                      noise_schedule=schedule)
         
         self.model = UnetConvNextBlock(dim=64,
                                        dim_mults=(1,2,4,8),
                                        channels=self.channels,
                                        out_dim=self.channels,
                                        with_time_emb=True)
-        self.sampler = DDPM_scheduler(num_timsteps=self.num_timesteps) if sampler is None else sampler
+        self.sampler = DDPM_scheduler(timesteps=self.num_timesteps) if sampler is None else sampler
 
     @torch.no_grad()
     def forward(self,
@@ -88,13 +88,13 @@ class ConditionalDenoisingDiffusion(nn.Module):
                  cond_channels=3,
                  loss_type='l2',
                  schedule='linear',
-                 num_timsteps=1000,
+                 num_timesteps=1000,
                  sampler=None) -> None:
         super().__init__()
 
         self.channels = channels
         self.cond_channels = cond_channels
-        self.num_timesteps = num_timsteps
+        self.num_timesteps = num_timesteps
 
         if loss_type == 'l1':
             self.criterion = F.l1_loss
@@ -105,7 +105,7 @@ class ConditionalDenoisingDiffusion(nn.Module):
         else:
             raise NotImplementedError()
         
-        self.forward_process = GaussianForwardProcess(num_timsteps=num_timsteps,
+        self.forward_process = GaussianForwardProcess(num_timsteps=num_timesteps,
                                                       schedule=schedule)
         
         self.model = UnetConvNextBlock(dim=64,

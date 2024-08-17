@@ -9,6 +9,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from diffusers.models import AutoencoderKL
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import make_grid
+
 
 from denoise_diffusion import DenoisingDiffusion, ConditionalDenoisingDiffusion
 
@@ -18,10 +21,10 @@ class AutoEncoderDiffusion(nn.Module):
     We use a frozen Autoencoder, obtain latents and run DDPM on latent space
     """
     def __init__(self,
-                 model_type=['stabilityai/sd-vae-ft-ema']) -> None:
+                 model_type='stabilityai/sd-vae-ft-ema') -> None:
         super().__init__()
     
-        self.model = AutoencoderKL.from_pretrained(model_type)
+        self.model = AutoencoderKL.from_pretrained(model_type,cache='/CT/prithvi/nobackup/huggingface/')
 
     def forward(self,input):
         return self.model(input).sample
@@ -47,7 +50,7 @@ class LatentDiffusion(pl.LightningModule):
                  batch_size=1,
                  lr=1e-4):
         
-        super.__init__()
+        super().__init__()
         self.train_dataset = train_dataset
         self.valid_dataset = val_dataset
 
@@ -65,6 +68,11 @@ class LatentDiffusion(pl.LightningModule):
         
     @torch.no_grad()
     def forward(self,*args,**kwargs):
+        """
+        one inference step
+        sample the latent from noise
+
+        """
         return self.output_T(self.autoencoder.decode(self.model(*args,**kwargs)/self.latent_scale_factor))
         
     def input_T(self,input):
@@ -83,6 +91,8 @@ class LatentDiffusion(pl.LightningModule):
         latents = self.autoencoder.encode(self.input_T(batch)).detach() * self.latent_scale_factor
         loss = self.model.p_loss(latents)
         self.log('train_loss',loss)
+        if batch_idx % 1000:
+            self.log_images(batch, latents, batch_idx)
         return loss
 
     def validation_step(self,batch,batch_idx):
@@ -90,6 +100,18 @@ class LatentDiffusion(pl.LightningModule):
         loss = self.model.p_loss(latents)
         self.log('val_loss',loss)
         return loss
+
+    def log_images(self, batch, latents, batch_idx):
+        """
+        Logs the input images, latents, and the reconstructed images to TensorBoard.
+        """
+        
+        writer = self.logger.experiment
+        reconstructed_images = self.autoencoder.decode(latents / self.latent_scale_factor)
+        input_images_grid = make_grid(self.input_T(batch), normalize=True, scale_each=True)
+        reconstructed_images_grid = make_grid(reconstructed_images, normalize=True, scale_each=True)
+        writer.add_image(f'batch_{batch_idx}_inputs', input_images_grid, global_step=self.current_epoch)
+        writer.add_image(f'batch_{batch_idx}_reconstructions', reconstructed_images_grid, global_step=self.current_epoch)
     
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
@@ -105,7 +127,7 @@ class LatentDiffusion(pl.LightningModule):
         else:
             return None
     def configure_optimizers(self):
-        return torch.optim.AdamW(list(filter(lambda p : p.requires_grad,self.model_parameters())),lr=self.lr)
+        return torch.optim.AdamW(list(filter(lambda p : p.requires_grad,self.model.parameters())),lr=self.lr)
     
 class ConditionalLatentDiffusion(pl.LightningModule):
     

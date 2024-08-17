@@ -12,7 +12,7 @@ class GaussianForwardProcess(nn.Module):
         self.schedule = noise_schedule
         self.num_timesteps = num_timesteps
 
-        betas = get_beta_schedule(self.scheduler,self.timesteps)
+        betas = get_beta_schedule(self.schedule,self.num_timesteps)
         sqrt_recip_alphas,\
             sqrt_alphas_cumprod,\
             sqrt_one_minus_alphas_cumprod,\
