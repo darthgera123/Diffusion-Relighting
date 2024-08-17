@@ -87,3 +87,4 @@ if __name__=="__main__":
         plt.subplot(1,len(out),idx+1)
         plt.imshow(out[idx].detach().cpu().permute(1,2,0))
         plt.axis('off')
+    plt.savefig('results.png')

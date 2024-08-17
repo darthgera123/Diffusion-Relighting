@@ -90,9 +90,11 @@ class LatentDiffusion(pl.LightningModule):
         """
         latents = self.autoencoder.encode(self.input_T(batch)).detach() * self.latent_scale_factor
         loss = self.model.p_loss(latents)
+        
         self.log('train_loss',loss)
-        if batch_idx % 1000:
-            self.log_images(batch, latents, batch_idx)
+        # if batch_idx % 1000 == 0:
+        #     sample_latent = self.model()
+        #     self.log_images(batch, latents, batch_idx)
         return loss
 
     def validation_step(self,batch,batch_idx):
