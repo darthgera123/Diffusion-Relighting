@@ -66,9 +66,7 @@ class RelitTrainer:
         os.makedirs(log_dir,exist_ok=True)
         os.makedirs(self.val_dir,exist_ok=True)
 
-        self.model_name = model
-        latent_size = (4,16,16)
-        self.model = CondUnet(in_ch=3,out_ch=3,latent_size=latent_size)
+        self.model = model
         self.model = self.model.cuda()
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
@@ -79,7 +77,7 @@ class RelitTrainer:
     def comp_loss(self,pred,gt):
         l1 = self.criterion(pred,gt)
         vgg = self.loss_fn_vgg.forward(pred,gt)
-        return l1+1e-1*vgg
+        return l1+1e-1*vgg.mean().squeeze()
 
 
     def train_epoch(self, epoch):
@@ -143,7 +141,8 @@ class RelitTrainer:
                 relit = relit.detach().cpu()
                 pred = pred.detach().cpu()
                 diffuse = diffuse.detach().cpu()
-                for i in range(env.shape(0)):
+                # for i in range(env.shape[0]):
+                for i in range(4):
 
                     diffuse_img = transforms.ToPILImage()(diffuse[i]).convert("RGB")
                     relit_img = transforms.ToPILImage()(relit[i]).convert("RGB")
@@ -152,10 +151,10 @@ class RelitTrainer:
                     diffuse_np = np.array(diffuse_img)
                     relit_np = np.array(relit_img)
                     pred_np = np.array(pred_img)
-                    combined_img = np.clip(np.hstack(diffuse_np,pred_np,relit_np))
+                    combined_img = np.clip(np.hstack((diffuse_np,pred_np,relit_np)),0,255)
                     name = data_idx['name'][i]
 
-                    file_name = os.path.join(self.val_dir, f'epoch_{epoch}_{name}.png')    
+                    file_name = os.path.join(self.val_dir, f'epoch_{epoch}_{batch_idx}_{i}.png')    
                     imwrite(file_name, combined_img)
                 return
     
@@ -187,7 +186,7 @@ class RelitTrainer:
                 relit = relit.detach().cpu()
                 pred = pred.detach().cpu()
                 diffuse = diffuse.detach().cpu()
-                for i in range(env.shape(0)):
+                for i in range(env.shape[0]):
 
                     diffuse_img = transforms.ToPILImage()(diffuse[i]).convert("RGB")
                     relit_img = transforms.ToPILImage()(relit[i]).convert("RGB")
@@ -196,7 +195,7 @@ class RelitTrainer:
                     diffuse_np = np.array(diffuse_img)
                     relit_np = np.array(relit_img)
                     pred_np = np.array(pred_img)
-                    combined_img = np.clip(np.hstack(diffuse_np,pred_np,relit_np))
+                    combined_img = np.clip(np.hstack((diffuse_np,pred_np,relit_np)),0,255)
                     name = data_idx['name'][i]
 
                     file_name = os.path.join(save_dir, f'{name}.png')    
@@ -223,39 +222,34 @@ if __name__ == "__main__":
     parser.add_argument("--diffuse_path",default="/scratch/inf0/user/pgera/FlashingLights/SingleRelight/sunrise_pullover/pose_01")
     parser.add_argument("--mask_path",default="/scratch/inf0/user/pgera/FlashingLights/SingleRelight/sunrise_pullover/pose_01")
     parser.add_argument("--normal_path",default="/scratch/inf0/user/pgera/FlashingLights/SingleRelight/sunrise_pullover/pose_01")
+    parser.add_argument("--light_encoder",default="cnn")
+    parser.add_argument("--attn",type=bool,default=False)
     parser.add_argument("--save_dir", default="transforms.json", help="output path")
     parser.add_argument("--checkpoint", default="transforms.json", help="output path")
     parser.add_argument("--lr",type=float, default=1e-3, help="output path")
     parser.add_argument("--epochs",type=int,default=100, help="create_images")
+    parser.add_argument("--batch_size",type=int,default=4, help="create_images")
     parser.add_argument("--train",action='store_true', help="create_images")
+    parser.add_argument("--skip_train",action='store_true', help="create_images")
     parser.add_argument("--network", default="uvrelit", help="output path")
     args = parser.parse_args()
 
-    uv_transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-        ])
 
-    env_transform = transforms.Compose([
-            transforms.Resize((16, 32)),  # Downsample the envmap
-            transforms.ToTensor(),
-        ])
-    if args.network == 'latent':
-        resize = False
-    else:
-        resize = True
     train_data = PortraitDataset(relit_path=args.relit_path, env_path=args.env_path, \
                               diffuse_path=args.diffuse_path, mask_path=args.mask_path,\
                               normal_path=args.normal_path,crop=True)
-    train_dataloader = DataLoader(train_data, batch_size=4, shuffle=True, num_workers=1,drop_last=True)
+    train_dataloader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=1,drop_last=True)
     val_data = PortraitDataset(relit_path=args.relit_path, env_path=args.env_path, \
                               diffuse_path=args.diffuse_path, mask_path=args.mask_path,\
                               normal_path=args.normal_path,train=False,crop=True)
-    val_dataloader = DataLoader(val_data, batch_size=4, shuffle=False, num_workers=1,drop_last=True)
+    val_dataloader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False, num_workers=1,drop_last=True)
     log_dir = os.path.join(args.save_dir,'logs')
     
     
-    trainer = RelitTrainer(args.network, train_dataloader, val_dataloader,save_dir=args.save_dir,log_dir=log_dir,lr=args.lr)
+    latent_size = (4,16,16)
+    model = CondUnet(in_ch=3,out_ch=3,latent_size=latent_size,light_encoder=args.light_encoder,attn=args.attn)
+    
+    trainer = RelitTrainer(model, train_dataloader, val_dataloader,save_dir=args.save_dir,log_dir=log_dir,lr=args.lr)
     if args.train:
         trainer.fit(epochs=args.epochs,validate_every_n_epochs=20)
         val_save_path = os.path.join(args.save_dir,'val')
