@@ -13,6 +13,17 @@ from cunet import EnvMapEncoder
 import torch.nn as nn
 from torch.nn import functional as F
 from typing import Any, Dict, List, Optional, Tuple, Union
+from dataset import PortraitControlNetDataset
+from diffusers import (
+    AutoencoderKL,
+    ControlNetModel,
+    DDPMScheduler,
+    StableDiffusionControlNetPipeline,
+    UNet2DConditionModel,
+    UniPCMultistepScheduler,
+)
+from transformers import AutoTokenizer, PretrainedConfig
+
 
 def zero_module(module):
     for p in module.parameters():
@@ -28,7 +39,24 @@ class CustomControlNet(ControlNetModel):
             block_out_channels=self.conditioning_embedding_out_channels,
             conditioning_channels=320,
         )
+def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):
+    text_encoder_config = PretrainedConfig.from_pretrained(
+        pretrained_model_name_or_path,
+        subfolder="text_encoder",
+        revision=revision,
+    )
+    model_class = text_encoder_config.architectures[0]
 
+    if model_class == "CLIPTextModel":
+        from transformers import CLIPTextModel
+
+        return CLIPTextModel
+    elif model_class == "RobertaSeriesModelWithTransformation":
+        from diffusers.pipelines.alt_diffusion.modeling_roberta_series import RobertaSeriesModelWithTransformation
+
+        return RobertaSeriesModelWithTransformation
+    else:
+        raise ValueError(f"{model_class} is not supported.")
 class ControlNetTest(nn.Module):
     """
     Quoting from https://arxiv.org/abs/2302.05543: "Stable Diffusion uses a pre-processing method similar to VQ-GAN
@@ -81,10 +109,38 @@ class CustomEnvMapControlNet(ControlNetModel):
 
         self.controlnet_cond_embedding = EnvMapEncoder(map_size=64,latent_size=320)
         self.controlnet_cond_embedding.additional_layers = zero_module(
-            self.controlnet_cond_embedding.add
+            self.controlnet_cond_embedding.additional_layers
         )
 
         
+def collate_fn_relit(examples):
+    pixel_values = torch.stack([example["diffuse"] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    conditioning_pixel_values = torch.stack([example["env"] for example in examples])
+    conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    relit_pixel_values = torch.stack([example["relit"] for example in examples])
+    relit_pixel_values = relit_pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    attention_mask = torch.stack([example["attention_mask"] for example in examples])
+    attention_mask = attention_mask.to(memory_format=torch.contiguous_format).float()
+
+    input_ids = torch.stack([example["text"] for example in examples])
+    input_ids = input_ids.to(memory_format=torch.contiguous_format)
+
+    mask = torch.stack([example["mask"] for example in examples])
+    mask = mask.to(memory_format=torch.contiguous_format).float()
+
+    return {
+        "pixel_values": pixel_values,
+        "conditioning_pixel_values": conditioning_pixel_values,
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "mask": mask,
+        "relit": relit_pixel_values
+    }
+
 
 
 
@@ -113,18 +169,6 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-# class CustomControlNet(ControlNetModel):
-#     def __init__(self, unet_config):
-#         super().__init__(unet_config)
-#         # Replace the controlnet conditioning embedding with a custom one
-#         self.controlnet_cond_embedding = ControlNetConditioningEmbedding(
-#             in_channels=320,  # Your control signal's channels
-#             out_channels=unet_config.conv_in.out_channels,  # Match UNet's expected channels
-#             conditioning_channels=unet_config.conv_in.out_channels,
-#             num_channels=unet_config.conv_in.out_channels,
-#             num_groups=32,
-#             activation=unet_config.activation_fn,
-#         )
 
 
 if __name__ == "__main__":
@@ -137,11 +181,22 @@ if __name__ == "__main__":
 
     
     image = torch.rand(4,3,512,512)
-    
+    tokenizer = AutoTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
+            use_fast=False,
+            cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/'
+        )
+    text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
+
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, \
         subfolder="unet", revision=args.revision, variant=args.variant,\
         cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/'
+    )
+    text_encoder = text_encoder_cls.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant,cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/'
     )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, \
                                         subfolder="vae",\
@@ -149,8 +204,41 @@ if __name__ == "__main__":
     
     # controlnet_config.in_channels = 320
     controlnet = CustomEnvMapControlNet.from_unet(unet)
-    # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler",cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/')
+    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, 
+                                                    subfolder="scheduler",
+                                                    cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/')
     
+    val_dataset = PortraitControlNetDataset(relit_path=args.relit_path, env_path=args.env_path, \
+                              diffuse_path=args.diffuse_path, mask_path=args.mask_path,\
+                              caption='Reconstruction',tokenizer=tokenizer,\
+                              normal_path=args.normal_path,train=False,crop=True)
+
+    val_dataloader = torch.utils.data.DataLoader(
+        val_dataset,
+        shuffle=True,
+        collate_fn=collate_fn_relit,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+    )
+    weight_dtype = torch.float32
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    pipeline = StableDiffusionControlNetPipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        unet=unet,
+        controlnet=controlnet,
+        safety_checker=None,
+        revision=args.revision,
+        variant=args.variant,
+        torch_dtype=weight_dtype,
+    )
+    pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
+    pipeline = pipeline.to(device)
+    pipeline.set_progress_bar_config(disable=True)
+    pipeline.eval()
+
     noisy_latents = torch.randn([4,4,64,64])
     timesteps = torch.randint(0, 1000, (4,))
     timesteps = timesteps.long()
@@ -168,27 +256,12 @@ if __name__ == "__main__":
         controlnet_cond=env_map,  # 64-channel input
         return_dict=False,
     )
-    # for i in range(len(down_block_res_samples)):
-    #     print(down_block_res_samples[i].shape)
-    # pipe = StableDiffusionControlNetImg2ImgPipeline(
-    # vae=vae,
-    # text_encoder=None,  # Not using text prompts
-    # tokenizer=None,
-    # unet=unet,
-    # controlnet=controlnet,
-    # safety_checker=None,  # Disable safety checker if not needed
-    # feature_extractor=None,
-    # )
-    # with torch.no_grad():
-    #     output = pipe(
-    #         prompt="",  # Empty string since we're not using text conditioning
-    #         image=image,
-    #         control_image=env_map,
-    #         num_inference_steps=50,
-    #         guidance_scale=7.5,
-    #     )
-    # relit_image = output.images[0]
-    # print(relit_image.shape)
+    with torch.no_grad():
+        for step,batch in enumerate(val_dataloader):
+            albedo = batch['pixel_values'].to(device,dtype=weight_dtype)
+            text = batch['input_ids'].to(device,dtype=weight_dtype)
+            env_map = batch['conditioning_pixel_values'].to(device,dtype=weight_dtype)
+            relit = batch['relit']
 
 
 

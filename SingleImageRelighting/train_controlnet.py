@@ -49,7 +49,6 @@ from diffusers import (
     UNet2DConditionModel,
     UniPCMultistepScheduler,
 )
-from diffusers.models.controlnet import ControlNetConditioningEmbedding  # Import the conditioning embedding
 
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_wandb_available
@@ -189,6 +188,115 @@ def log_validation(
         torch.cuda.empty_cache()
 
         return image_logs
+
+
+def log_validation_relit(
+    vae, text_encoder, \
+    tokenizer, unet, controlnet, \
+    args, accelerator, weight_dtype, \
+    step, is_final_validation=False, val_dataloader=None
+    ):
+    logger.info("Running validation... ")
+
+    if not is_final_validation:
+        controlnet = accelerator.unwrap_model(controlnet)
+    else:
+        controlnet = ControlNetModel.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
+
+    pipeline = StableDiffusionControlNetPipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        unet=unet,
+        controlnet=controlnet,
+        safety_checker=None,
+        revision=args.revision,
+        variant=args.variant,
+        torch_dtype=weight_dtype,
+    )
+    pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
+    pipeline = pipeline.to(accelerator.device)
+    pipeline.set_progress_bar_config(disable=True)
+
+    if args.enable_xformers_memory_efficient_attention:
+        pipeline.enable_xformers_memory_efficient_attention()
+
+    if args.seed is None:
+        generator = None
+    else:
+        generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+
+
+    image_logs = []
+    
+    inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
+    for step,batch in enumerate(val_dataloader):
+        if step > 1:
+            break
+        albedo = batch['pixel_values'].to(dtype=weight_dtype)
+        env_map = batch['conditioning_pixel_values'].to(dtype=weight_dtype)
+        relit = batch['relit'].to(dtype=weight_dtype)
+        text = batch['input_ids'].to(dtype=weight_dtype)
+        
+        with inference_ctx:
+            pred_image = pipeline(
+                text, albedo, num_inference_steps=20, generator=generator
+            ).images[0]
+        images = []
+        images.append(pred_image)
+        image_logs.append(
+            {
+                "albedo": albedo,
+                "env_map": env_map,
+                "pred_images": images
+            }
+        )
+
+    tracker_key = "test" if is_final_validation else "validation"
+    for tracker in accelerator.trackers:
+        if tracker.name == "tensorboard":
+            for log in image_logs:
+                images = log["pred_images"]
+                # validation_prompt = log["validation_prompt"]
+                env_maps = log['env_map']
+                albedo = log["albedo"]
+
+                formatted_images = []
+
+                formatted_images.append(np.asarray(albedo))
+                formatted_images.append(np.asarray(env_maps))
+
+                for image in images:
+                    formatted_images.append(np.asarray(image))
+
+                formatted_images = np.stack(formatted_images)
+
+                tracker.writer.add_images(formatted_images, step, dataformats="NHWC")
+        elif tracker.name == "wandb":
+            formatted_images = []
+
+            for log in image_logs:
+                images = log["images"]
+                validation_prompt = log["validation_prompt"]
+                validation_image = log["validation_image"]
+
+                formatted_images.append(wandb.Image(validation_image, caption="Controlnet conditioning"))
+
+                for image in images:
+                    image = wandb.Image(image, caption=validation_prompt)
+                    formatted_images.append(image)
+
+            tracker.log({tracker_key: formatted_images})
+        else:
+            logger.warning(f"image logging not implemented for {tracker.name}")
+
+        del pipeline
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        return image_logs
+
 
 
 def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):
@@ -984,10 +1092,23 @@ def main(args):
     train_dataset = PortraitControlNetDataset(relit_path=args.relit_path, env_path=args.env_path, \
                               diffuse_path=args.diffuse_path, mask_path=args.mask_path,\
                               caption='Reconstruction',tokenizer=tokenizer,\
-                              normal_path=args.normal_path,train=False,crop=True)
+                              normal_path=args.normal_path,train=True,crop=True)
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
+        shuffle=True,
+        collate_fn=collate_fn_relit,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+    )
+
+    val_dataset = PortraitControlNetDataset(relit_path=args.relit_path, env_path=args.env_path, \
+                              diffuse_path=args.diffuse_path, mask_path=args.mask_path,\
+                              caption='Reconstruction',tokenizer=tokenizer,\
+                              normal_path=args.normal_path,train=False,crop=True)
+
+    val_dataloader = torch.utils.data.DataLoader(
+        val_dataset,
         shuffle=True,
         collate_fn=collate_fn_relit,
         batch_size=args.train_batch_size,
@@ -1190,7 +1311,7 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
 
                     if args.validation_prompt is not None and global_step % args.validation_steps == 0:
-                        image_logs = log_validation(
+                        image_logs = log_validation_relit(
                             vae,
                             text_encoder,
                             tokenizer,
@@ -1200,6 +1321,7 @@ def main(args):
                             accelerator,
                             weight_dtype,
                             global_step,
+                            val_dataloader
                         )
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
