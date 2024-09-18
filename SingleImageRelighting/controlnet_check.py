@@ -81,7 +81,7 @@ class CustomEnvMapControlNet(ControlNetModel):
 
         self.controlnet_cond_embedding = EnvMapEncoder(map_size=64,latent_size=320)
         self.controlnet_cond_embedding.additional_layers = zero_module(
-            self.controlnet_cond_embedding.additional_layers
+            self.controlnet_cond_embedding.add
         )
 
         

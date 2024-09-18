@@ -58,7 +58,7 @@ from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
 from dataset import PortraitControlNetDataset
-from cunet import EnvMapEncoder,TransformerEncoder
+from cunet import EnvMapEncoder,TransformerEncoder, zero_module
 
 if is_wandb_available():
     import wandb
@@ -772,6 +772,18 @@ def collate_fn_relit(examples):
         "relit": relit_pixel_values
     }
 
+
+
+class CustomEnvMapControlNet(ControlNetModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args,**kwargs)
+
+        self.controlnet_cond_embedding = EnvMapEncoder(map_size=64,latent_size=320)
+        self.controlnet_cond_embedding.additional_layers = zero_module(
+            self.controlnet_cond_embedding.additional_layers
+        )
+
+
 def main(args):
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -858,15 +870,10 @@ def main(args):
         controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path,cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/')
     else:
         logger.info("Initializing controlnet weights from unet")
-        controlnet = ControlNetModel.from_unet(unet)
+        # controlnet = ControlNetModel.from_unet(unet)
+        controlnet = CustomEnvMapControlNet.from_unet(unet)
     
-    controlnet.controlnet_cond_embedding = ControlNetConditioningEmbedding(
-            conditioning_embedding_channels=controlnet.block_out_channels[0],
-            block_out_channels=controlnet.conditioning_embedding_out_channels,
-            conditioning_channels=64,  # Change to 64 channels
-    )
-
-    # controlnet.conv_in = torch.nn.Conv2d(64, 320, kernel_size=3, stride=1, padding=1)
+    
 
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
@@ -1110,21 +1117,15 @@ def main(args):
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
                 
-                print("Noisy Latents",noisy_latents.shape)
-                print("timesteps ", timesteps.shape)
-                print("Encoder_hidden_states", encoder_hidden_states.shape)
-                exit()
                 # controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
                 env_map = batch["conditioning_pixel_values"].to(accelerator.device,dtype=weight_dtype)
-                env_map_feature = envmap_encoder(env_map) # Bx64x320x320
-
 
                 down_block_res_samples, mid_block_res_sample = controlnet(
                     noisy_latents,
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
                     # controlnet_cond=controlnet_image,
-                    controlnet_cond=env_map_feature,
+                    controlnet_cond=env_map,
                     return_dict=False,
                 )
 

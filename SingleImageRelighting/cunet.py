@@ -340,6 +340,11 @@ class CondUnet(nn.Module):
         return relit
     
 
+
+def zero_module(module):
+    for p in module.parameters():
+        nn.init.zeros_(p)
+    return module
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     if total_params < 1000:
