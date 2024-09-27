@@ -148,7 +148,7 @@ class PortraitControlNetDataset(Dataset):
                  caption='Reconstruction',
                  resize = True,
                  train=True,
-                 test_count=100,
+                 test_count=10,
                  crop=True):
         
         self.relit_path = relit_path

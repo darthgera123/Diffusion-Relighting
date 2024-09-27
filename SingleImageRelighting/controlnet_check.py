@@ -21,6 +21,8 @@ from diffusers import (
     StableDiffusionControlNetPipeline,
     UNet2DConditionModel,
     UniPCMultistepScheduler,
+    StableDiffusionControlNetImg2ImgPipeline
+
 )
 from transformers import AutoTokenizer, PretrainedConfig
 
@@ -168,6 +170,25 @@ def parse_args():
     )
     args = parser.parse_args()
     return args
+def save_tensor_as_image(tensor_image, file_name):
+    # If the tensor has a batch dimension, remove it
+    if tensor_image.ndim == 4:
+        tensor_image = tensor_image.squeeze(0)  # Removes the batch dimension
+
+    # Ensure the tensor is in the range [0, 1] (for normalization)
+    tensor_image = torch.clamp(tensor_image, 0, 1)
+
+    # Convert tensor from (C, H, W) -> (H, W, C) and multiply by 255 to get pixel values
+    image_np = tensor_image.permute(1, 2, 0).cpu().numpy() * 255
+
+    # Convert to uint8
+    image_np = image_np.astype('uint8')
+
+    # Convert numpy array to PIL image
+    image_pil = Image.fromarray(image_np)
+
+    # Save the image
+    image_pil.save(file_name)
 
 
 
@@ -202,8 +223,11 @@ if __name__ == "__main__":
                                         subfolder="vae",\
                                         cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/')
     
+    weight_dtype = torch.float32
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(device)
     # controlnet_config.in_channels = 320
-    controlnet = CustomEnvMapControlNet.from_unet(unet)
+    controlnet = CustomEnvMapControlNet.from_unet(unet).to(device)
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, 
                                                     subfolder="scheduler",
                                                     cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/')
@@ -217,51 +241,76 @@ if __name__ == "__main__":
         val_dataset,
         shuffle=True,
         collate_fn=collate_fn_relit,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
+        batch_size=1,
+        num_workers=1,
     )
-    weight_dtype = torch.float32
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    pipeline = StableDiffusionControlNetPipeline.from_pretrained(
+    
+    # pipeline = StableDiffusionControlNetPipeline.from_pretrained(
+    #     args.pretrained_model_name_or_path,
+    #     vae=vae,
+    #     text_encoder=text_encoder,
+    #     tokenizer=tokenizer,
+    #     unet=unet,
+    #     controlnet=controlnet,
+    #     safety_checker=None,
+    #     revision=args.revision,
+    #     variant=args.variant,
+    #     torch_dtype=weight_dtype,
+    # )
+    pipeline = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         vae=vae,
         text_encoder=text_encoder,
         tokenizer=tokenizer,
         unet=unet,
         controlnet=controlnet,
-        safety_checker=None,
+        safety_checker=None,  # Optional, can be enabled for safety checks
         revision=args.revision,
         variant=args.variant,
         torch_dtype=weight_dtype,
     )
+
     pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
     pipeline = pipeline.to(device)
     pipeline.set_progress_bar_config(disable=True)
-    pipeline.eval()
+    # pipeline.eval()
 
-    noisy_latents = torch.randn([4,4,64,64])
-    timesteps = torch.randint(0, 1000, (4,))
+    noisy_latents = torch.randn([4,4,64,64]).to(device)
+    timesteps = torch.randint(0, 1000, (4,)).to(device)
     timesteps = timesteps.long()
-    encoder_hidden_states = torch.randn([4,77,1024])
-    env_map = torch.rand(4,3,256,512)
-    light_enc = EnvMapEncoder(map_size=64,latent_size=320)
+    encoder_hidden_states = torch.randn([4,77,1024]).to(device)
+    env_map = torch.rand(4,3,256,512).to(device)
+    light_enc = EnvMapEncoder(map_size=64,latent_size=320).to(device)
     light_feat = light_enc(env_map)
     # controlnet_embedding = ControlNetConditioningEmbedding(conditioning_embedding_channels=320)
     # latent = controlnet_embedding(env_map)
-    print(light_feat.shape)
+    
     down_block_res_samples, mid_block_res_sample = controlnet(
         noisy_latents,
         timesteps,
         encoder_hidden_states=encoder_hidden_states,
         controlnet_cond=env_map,  # 64-channel input
         return_dict=False,
+        
     )
     with torch.no_grad():
         for step,batch in enumerate(val_dataloader):
             albedo = batch['pixel_values'].to(device,dtype=weight_dtype)
             text = batch['input_ids'].to(device,dtype=weight_dtype)
             env_map = batch['conditioning_pixel_values'].to(device,dtype=weight_dtype)
-            relit = batch['relit']
+            relit = batch['relit'].to(device,dtype=weight_dtype)
+            
+            prompts = ['Reconstruction']*1
+            print(albedo.shape,len(prompts),env_map.shape)
+            image = pipeline(
+                prompt= prompts, control_image = env_map,image=albedo, num_inference_steps=20
+            ).images
+            print(len(image))
+            image[0].save('output.png')
+            save_tensor_as_image(albedo[0],'albedo.png')
+            save_tensor_as_image(env_map[0],'envmap.png')
+            save_tensor_as_image(relit[0],'relit.png')
+            exit()
 
 
 

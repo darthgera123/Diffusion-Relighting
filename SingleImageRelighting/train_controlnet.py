@@ -48,6 +48,7 @@ from diffusers import (
     StableDiffusionControlNetPipeline,
     UNet2DConditionModel,
     UniPCMultistepScheduler,
+    StableDiffusionControlNetImg2ImgPipeline
 )
 
 from diffusers.optimization import get_scheduler
@@ -201,9 +202,9 @@ def log_validation_relit(
     if not is_final_validation:
         controlnet = accelerator.unwrap_model(controlnet)
     else:
-        controlnet = ControlNetModel.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
+        controlnet = CustomEnvMapControlNet.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
 
-    pipeline = StableDiffusionControlNetPipeline.from_pretrained(
+    pipeline = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         vae=vae,
         text_encoder=text_encoder,
@@ -237,42 +238,48 @@ def log_validation_relit(
         albedo = batch['pixel_values'].to(dtype=weight_dtype)
         env_map = batch['conditioning_pixel_values'].to(dtype=weight_dtype)
         relit = batch['relit'].to(dtype=weight_dtype)
-        text = batch['input_ids'].to(dtype=weight_dtype)
+        # text = batch['input_ids'].to(dtype=weight_dtype)
+        prompts = ['Reconstruction'] * albedo.shape[0]
         
         with inference_ctx:
             pred_image = pipeline(
-                text, albedo, num_inference_steps=20, generator=generator
-            ).images[0]
+                prompt=prompts, image=albedo,control_image=env_map,
+                num_inference_steps=20, generator=generator
+            ).images
         images = []
-        images.append(pred_image)
-        image_logs.append(
-            {
-                "albedo": albedo,
-                "env_map": env_map,
-                "pred_images": images
-            }
-        )
+        for i in range(len(pred_image)):
+            image_logs.append(
+                {
+                    "albedo": albedo[i],
+                    "env_map": env_map[i],
+                    "pred": pred_image[i],
+                    "relit": relit[i]
+                }
+            )
 
     tracker_key = "test" if is_final_validation else "validation"
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
             for log in image_logs:
-                images = log["pred_images"]
+                images = log["pred"]
                 # validation_prompt = log["validation_prompt"]
                 env_maps = log['env_map']
                 albedo = log["albedo"]
+                relit = log["relit"]
 
                 formatted_images = []
-
-                formatted_images.append(np.asarray(albedo))
-                formatted_images.append(np.asarray(env_maps))
-
-                for image in images:
-                    formatted_images.append(np.asarray(image))
-
+                
+                formatted_images.append((np.asarray(albedo).transpose(1,2,0)*255).astype('uint8'))
+                # formatted_images.append(np.asarray(env_maps))
+                formatted_images.append((np.asarray(relit).transpose(1,2,0)*255).astype('uint8'))
+                formatted_images.append(np.asarray(images))
+                # for i in range(len(images)):
+                #     formatted_images.append(np.asarray(image))
+                
                 formatted_images = np.stack(formatted_images)
-
-                tracker.writer.add_images(formatted_images, step, dataformats="NHWC")
+                
+                tracker.writer.add_images('Results',formatted_images, step, dataformats="NHWC")
+                tracker.writer.add_images('Env_Map',(np.asarray(env_maps).transpose(1,2,0)*255).astype('uint8'), step, dataformats="HWC")
         elif tracker.name == "wandb":
             formatted_images = []
 
@@ -431,7 +438,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=500,
+        default=200,
         help=(
             "Save a checkpoint of the training state every X updates. Checkpoints can be used for resuming training via `--resume_from_checkpoint`. "
             "In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference."
@@ -652,7 +659,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--num_validation_images",
         type=int,
-        default=4,
+        default=1,
         help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",
     )
     parser.add_argument(
@@ -1077,8 +1084,8 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    # params_to_optimize = controlnet.parameters()
-    params_to_optimize = list(controlnet.parameters()) + list(envmap_encoder.parameters())
+    params_to_optimize = controlnet.parameters()
+    # params_to_optimize = list(controlnet.parameters()) + list(envmap_encoder.parameters())
     
     optimizer = optimizer_class(
         params_to_optimize,
@@ -1111,7 +1118,7 @@ def main(args):
         val_dataset,
         shuffle=True,
         collate_fn=collate_fn_relit,
-        batch_size=args.train_batch_size,
+        batch_size=1,
         num_workers=args.dataloader_num_workers,
     )
 
@@ -1239,8 +1246,7 @@ def main(args):
                 encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
                 
                 # controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-                env_map = batch["conditioning_pixel_values"].to(accelerator.device,dtype=weight_dtype)
-
+                env_map = batch["conditioning_pixel_values"].to(accelerator.device) # print(light_feat.shape)
                 down_block_res_samples, mid_block_res_sample = controlnet(
                     noisy_latents,
                     timesteps,
@@ -1310,19 +1316,20 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                    if global_step % args.validation_steps == 0:
                         image_logs = log_validation_relit(
-                            vae,
-                            text_encoder,
-                            tokenizer,
-                            unet,
-                            controlnet,
-                            args,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                            val_dataloader
-                        )
+                        vae=vae,
+                        text_encoder=text_encoder,
+                        tokenizer=tokenizer,
+                        unet=unet,
+                        controlnet=controlnet,
+                        args=args,
+                        accelerator=accelerator,
+                        weight_dtype=weight_dtype,
+                        step=global_step,
+                        is_final_validation=False,
+                        val_dataloader=val_dataloader
+                    )
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
