@@ -46,6 +46,10 @@ def norm_img(image):
     img = (image - image_min) / (image_max - image_min) 
     return img.astype('float64')
 
+def norm_log(image,alpha=1.0)
+    norm = np.log(1+alpha*image)/np.log(1+np.max(image))
+    return norm
+
 def norm_env_int(env):
     energy = np.sum(env)
     img = (env-env.min())/energy
@@ -184,7 +188,9 @@ class PortraitControlNetDataset(Dataset):
         h,w,c = relit.shape
         # relit = cv2.resize(relit,(w//2,h//2),cv2.INTER_AREA)
         
-        envmaps = norm_img(imread(os.path.join(self.env_path,name+'.exr')))
+        # envmaps = norm_img(imread(os.path.join(self.env_path,name+'.exr')))
+        # envmaps = imread(os.path.join(self.env_path,name+'.exr'))
+        envmaps = norm_log(imread(os.path.join(self.env_path,name+'.exr')))
         if self.crop:
             relit = crop_box(relit,160,0,512,512)
             diffuse_img = crop_box(self.diffuse_img,160,0,512,512)

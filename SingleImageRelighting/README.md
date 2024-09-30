@@ -1,4 +1,8 @@
 ## ControlNet Training
+
+Model used:
+`export MODEL_DIR="stabilityai/stable-diffusion-2"`
+
 ```
 accelerate launch train_controlnet.py \
  --pretrained_model_name_or_path=$MODEL_DIR \

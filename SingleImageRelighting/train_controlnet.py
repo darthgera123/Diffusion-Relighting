@@ -56,6 +56,8 @@ from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
+# from PerceptualSimilarity.lpips.lpips import lpips
+from lpips import lpips
 
 from dataset import PortraitControlNetDataset
 from cunet import EnvMapEncoder,TransformerEncoder, zero_module
@@ -232,8 +234,8 @@ def log_validation_relit(
     image_logs = []
     
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
-    for step,batch in enumerate(val_dataloader):
-        if step > 1:
+    for i,batch in enumerate(val_dataloader):
+        if i > 1:
             break
         albedo = batch['pixel_values'].to(dtype=weight_dtype)
         env_map = batch['conditioning_pixel_values'].to(dtype=weight_dtype)
@@ -277,7 +279,7 @@ def log_validation_relit(
                 #     formatted_images.append(np.asarray(image))
                 
                 formatted_images = np.stack(formatted_images)
-                
+                print("Step", step)
                 tracker.writer.add_images('Results',formatted_images, step, dataformats="NHWC")
                 tracker.writer.add_images('Env_Map',(np.asarray(env_maps).transpose(1,2,0)*255).astype('uint8'), step, dataformats="HWC")
         elif tracker.name == "wandb":
@@ -988,7 +990,7 @@ def main(args):
         # controlnet = ControlNetModel.from_unet(unet)
         controlnet = CustomEnvMapControlNet.from_unet(unet)
     
-    
+    loss_fn_vgg= lpips.LPIPS(net='vgg').cuda()
 
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
@@ -1112,7 +1114,7 @@ def main(args):
     val_dataset = PortraitControlNetDataset(relit_path=args.relit_path, env_path=args.env_path, \
                               diffuse_path=args.diffuse_path, mask_path=args.mask_path,\
                               caption='Reconstruction',tokenizer=tokenizer,\
-                              normal_path=args.normal_path,train=False,crop=True)
+                              normal_path=args.normal_path,train=True,crop=True)
 
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
@@ -1142,7 +1144,8 @@ def main(args):
     controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         controlnet, optimizer, train_dataloader, lr_scheduler
     )
-
+    unet.config['controlnet'] = controlnet.config
+    unet.config['image_encoder'] = vae.config
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
@@ -1230,7 +1233,7 @@ def main(args):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
-
+                latents.requires_grad_(True)
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
@@ -1277,7 +1280,29 @@ def main(args):
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
-                accelerator.backward(loss)
+                decoded_images = vae.decode(latents/ vae.config.scaling_factor).sample
+
+                gt_img = batch['relit'].to(accelerator.device,dtype=weight_dtype)
+                # print(decoded_images.sample.shape)
+                l_percep = loss_fn_vgg(decoded_images,gt_img)
+                
+                total_loss = loss + 1e-2*l_percep.mean()
+
+                # adding sds loss
+                # latent_gradients = torch.autograd.grad(
+                #     loss,  # Compute the loss based on model predictions and noise
+                #     latents,  # Gradients are taken w.r.t. the latents
+                #     create_graph=True  # Allow further gradient computation if needed
+                # )[0]
+                latent_gradients = torch.autograd.grad(
+                    total_loss,  # Compute the loss based on model predictions and noise
+                    latents,  # Gradients are taken w.r.t. the latents
+                    create_graph=True  # Allow further gradient computation if needed
+                )[0]
+                latents = latents - latent_gradients * args.learning_rate
+
+                # accelerator.backward(loss)
+                accelerator.backward(total_loss)
                 if accelerator.sync_gradients:
                     params_to_clip = controlnet.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
@@ -1326,7 +1351,7 @@ def main(args):
                         args=args,
                         accelerator=accelerator,
                         weight_dtype=weight_dtype,
-                        step=global_step,
+                        step=step,
                         is_final_validation=False,
                         val_dataloader=val_dataloader
                     )

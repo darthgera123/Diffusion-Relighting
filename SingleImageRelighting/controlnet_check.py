@@ -209,7 +209,8 @@ if __name__ == "__main__":
             use_fast=False,
             cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/'
         )
-    text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
+    text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, \
+                                                                  args.revision)
 
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, \
@@ -217,7 +218,8 @@ if __name__ == "__main__":
         cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/'
     )
     text_encoder = text_encoder_cls.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant,cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/'
+        args.pretrained_model_name_or_path, subfolder="text_encoder", \
+            revision=args.revision, variant=args.variant,cache_dir='/scratch/inf0/user/pgera/FlashingLights/SingleRelight/cache/'
     )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, \
                                         subfolder="vae",\
